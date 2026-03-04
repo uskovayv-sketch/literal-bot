@@ -9,26 +9,34 @@ import re
 from datetime import datetime
 import os
 import sys
-from aiohttp import web
+from threading import Thread
 
-# Простой HTTP сервер для Health Check
-async def health_check(request):
-    return web.Response(text="I'm alive!")
+# ===== БЛОК ДЛЯ RENDER (НЕ УДАЛЯТЬ!) =====
+from flask import Flask
+import threading
 
-async def start_health_server():
-    app = web.Application()
-    app.router.add_get('/', health_check)
-    app.router.add_get('/health', health_check)
-    
-    # Render дает порт через переменную окружения
-    port = int(os.environ.get('PORT', 8080))
-    
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-    print(f"✅ Health server running on port {port}")
-    
+# Создаем Flask сервер
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Litera Bot is running! 🤖"
+
+@app.route('/health')
+def health():
+    return "OK", 200
+
+def run_flask():
+    """Запуск Flask сервера"""
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+
+# Запускаем Flask в фоне
+flask_thread = Thread(target=run_flask)
+flask_thread.daemon = True
+flask_thread.start()
+# ===== КОНЕЦ БЛОКА =====
+
 # ===== НАСТРОЙКА ЛОГИРОВАНИЯ =====
 if not os.path.exists('logs'):
     os.makedirs('logs')
@@ -61,7 +69,7 @@ essay_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
 essay_logger.addHandler(essay_handler)
 essay_logger.setLevel(logging.INFO)
 
-# ===== ТВОИ ДАННЫЕ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ =====
+# ===== ДАННЫЕ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ =====
 TOKEN = os.getenv('BOT_TOKEN')
 GIGACHAT_CREDENTIALS = os.getenv('GIGACHAT_CREDENTIALS')
 
@@ -80,6 +88,7 @@ user_states = {}
 # Логируем запуск
 logging.info("="*50)
 logging.info("БОТ ЗАПУЩЕН")
+logging.info(f"Flask сервер запущен на порту {os.environ.get('PORT', 10000)}")
 logging.info("="*50)
 
 print("Идет загрузка моделей ☆ｏ(＞＜；)○  ")
@@ -439,7 +448,6 @@ async def dispach(message: Message):
 
 async def main() -> None:
     bot = Bot(token=TOKEN)
-    asyncio.create_task(start_health_server())
     logging.info("Бот запускается...")
     await dp.start_polling(bot)
 
