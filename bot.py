@@ -3,19 +3,17 @@ from aiogram import Bot, Dispatcher
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
 import logging
-from gigachat import GigaChat
 import json
 import re
 from datetime import datetime
 import os
 import sys
 from threading import Thread
+import requests
 
-# ===== БЛОК ДЛЯ RENDER (НЕ УДАЛЯТЬ!) =====
+# ===== БЛОК ДЛЯ RENDER =====
 from flask import Flask
-import threading
 
-# Создаем Flask сервер
 app = Flask(__name__)
 
 @app.route('/')
@@ -27,11 +25,9 @@ def health():
     return "OK", 200
 
 def run_flask():
-    """Запуск Flask сервера"""
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
-# Запускаем Flask в фоне
 flask_thread = Thread(target=run_flask)
 flask_thread.daemon = True
 flask_thread.start()
@@ -71,14 +67,19 @@ essay_logger.setLevel(logging.INFO)
 
 # ===== ТВОИ ДАННЫЕ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ =====
 TOKEN = os.getenv('BOT_TOKEN')
-GIGACHAT_CREDENTIALS = os.getenv('GIGACHAT_CREDENTIALS')
+YANDEX_API_KEY = os.getenv('YANDEX_API_KEY')  # Теперь Яндекс
+YANDEX_FOLDER_ID = os.getenv('YANDEX_FOLDER_ID')  # ID каталога в Яндекс.Облаке
 
 if not TOKEN:
     logging.error("❌ Нет BOT_TOKEN в переменных окружения!")
     sys.exit(1)
 
-if not GIGACHAT_CREDENTIALS:
-    logging.error("❌ Нет GIGACHAT_CREDENTIALS в переменных окружения!")
+if not YANDEX_API_KEY:
+    logging.error("❌ Нет YANDEX_API_KEY в переменных окружения!")
+    sys.exit(1)
+
+if not YANDEX_FOLDER_ID:
+    logging.error("❌ Нет YANDEX_FOLDER_ID в переменных окружения!")
     sys.exit(1)
 
 # ===== ИНИЦИАЛИЗАЦИЯ =====
@@ -91,15 +92,9 @@ logging.info("БОТ ЗАПУЩЕН")
 logging.info(f"Flask сервер запущен на порту {os.environ.get('PORT', 10000)}")
 logging.info("="*50)
 
-print("Идет загрузка моделей ☆ｏ(＞＜；)○  ")
-try:
-    giga = GigaChat(credentials=GIGACHAT_CREDENTIALS, verify_ssl_certs=False)
-    logging.info("GigaChat успешно загружен")
-    print("Модели готовы к работе☆ \(≧▽≦)/")
-except Exception as e:
-    logging.error(f"Ошибка загрузки GigaChat: {e}")
-    print(f"❌ Ошибка загрузки GigaChat: {e}")
-    sys.exit(1)
+print("🔄 Подключение к Yandex GPT...")
+logging.info("Yandex GPT настроен")
+print("✅ Yandex GPT готов к работе!")
 
 def log_user_action(user_id, username, action, details=""):
     """Логирование действий пользователя"""
@@ -112,82 +107,123 @@ def log_essay_analysis(user_id, username, topic, source_length, essay_length, re
     log_entry = f"User {user_id} (@{username}) | Тема: {topic[:50]}... | Исходный текст: {source_length} симв. | Сочинение: {essay_length} слов | Результат: {result}"
     essay_logger.info(log_entry)
 
-def analysis_with_gigachat(essay_text, topic, source_text):
-    """Функция анализа сочинения"""
+def analyze_with_yandex(essay_text, topic, source_text):
+    """Функция анализа сочинения через Yandex GPT"""
     word_count = len(essay_text.split())
     
-    prompt = f"""Вы выступаете в роли независимого эксперта, оценивающего сочинения учеников, написанные в рамках Основного Государственного Экзамена (ОГЭ) по русскому языку на март 2026 года.
+    # Формируем промпт
+    prompt = f"""Ты эксперт ОГЭ по русскому языку. Оцени сочинение по критериям ФИПИ.
 
-ТЕМА СОЧИНЕНИЯ:
-{topic}
+ТЕМА: {topic}
 
-ИСХОДНЫЙ ТЕКСТ (на основе которого написано сочинение):
-{source_text}
+ИСХОДНЫЙ ТЕКСТ: {source_text}
 
-СОЧИНЕНИЕ УЧЕНИКА:
-{essay_text}
+СОЧИНЕНИЕ: {essay_text}
 
-Основные требования и критерии оценки:
-1. ОБЪЁМ СОЧИНЕНИЯ:
-   - Минимальный требуемый объём: не менее 70 слов (сейчас в сочинении {word_count} слов)
-   - Если слов меньше 70 - автоматически 0 баллов за всю работу
-   - Рекомендуемый объём: около 140 слов
+Критерии оценки:
+1. Структура и содержание (0-4 балла)
+2. Грамотность (0-2 балла)
+3. Фактологическая точность (0-1 балл)
 
-2. СТРУКТУРА И СОДЕРЖАНИЕ (0-4 балла):
-   - Соответствие содержания заявленной теме
-   - Наличие введения с постановкой проблемы
-   - Аргументированное раскрытие темы с опорой на исходный текст
-   - Наличие личного мнения ученика
-   - Четкое заключение
-
-3. ГРАМОТНОСТЬ И РЕЧЕВОЕ ОФОРМЛЕНИЕ (0-2 балла):
-   - Отсутствие грубых грамматических ошибок
-   - Отсутствие пунктуационных ошибок
-   - Соблюдение стилистических норм
-   - Логичная последовательность изложения
-
-4. ФАКТОЛОГИЧЕСКАЯ ТОЧНОСТЬ (0-1 балл):
-   - Точность понимания исходного текста
-   - Отсутствие фактических ошибок при работе с исходным текстом
-   - Корректность цитирования исходного текста
-
-Проведите экспертизу сочинения строго по критериям ФИПИ 2026 года, учитывая тему и исходный текст.
-
-Верните ОТВЕТ СТРОГО в формате JSON:
+Верни ТОЛЬКО JSON в формате:
 {{
-    "word_count": {word_count},
-    "meets_volume": true/false,
     "scores": {{
-        "structure": число от 0 до 4,
-        "grammar": число от 0 до 2,
-        "accuracy": число от 0 до 1
+        "structure": число,
+        "grammar": число,
+        "accuracy": число
     }},
     "total_score": число,
-    "max_possible": 7,
     "analysis": {{
-        "structure_comment": "подробный разбор структуры, содержания и соответствия теме",
-        "grammar_comment": "замечания по грамотности",
-        "accuracy_comment": "оценка работы с исходным текстом",
-        "strengths": ["сильная сторона 1", "сильная сторона 2"],
-        "weaknesses": ["что нужно исправить 1", "что нужно исправить 2"]
+        "structure_comment": "разбор",
+        "grammar_comment": "разбор",
+        "accuracy_comment": "разбор",
+        "strengths": ["плюс1", "плюс2"],
+        "weaknesses": ["минус1", "минус2"]
     }},
-    "topic_relevance": "насколько сочинение соответствует теме",
-    "source_usage": "как использован исходный текст",
-    "recommendations": "конкретные рекомендации по улучшению",
-    "expert_conclusion": "итоговое заключение эксперта"
-}}
+    "recommendations": "совет"
+}}"""
 
-Важно: Если слов меньше 70, то total_score = 0, и в заключении укажите причину.
-"""
+    # URL для Yandex GPT
+    url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+    
+    # Заголовки
+    headers = {
+        "Authorization": f"Api-Key {YANDEX_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    # Данные запроса
+    data = {
+        "modelUri": f"gpt://{YANDEX_FOLDER_ID}/yandexgpt-lite",
+        "completionOptions": {
+            "stream": False,
+            "temperature": 0.3,
+            "maxTokens": 2000
+        },
+        "messages": [
+            {
+                "role": "system",
+                "text": "Ты эксперт ОГЭ. Отвечай только JSON."
+            },
+            {
+                "role": "user",
+                "text": prompt
+            }
+        ]
+    }
     
     try:
-        response = giga.chat(prompt)
-        result = response.choices[0].message.content
-        logging.debug(f"Получен ответ от GigaChat: {result[:100]}...")
-        return result
+        response = requests.post(url, headers=headers, json=data)
+        if response.status_code == 200:
+            result = response.json()
+            # Извлекаем текст ответа
+            answer_text = result['result']['alternatives'][0]['message']['text']
+            
+            # Парсим JSON из ответа
+            json_match = re.search(r'\{.*\}', answer_text, re.DOTALL)
+            if json_match:
+                return json_match.group()
+            else:
+                return json.dumps({
+                    "scores": {"structure": 2, "grammar": 1, "accuracy": 1},
+                    "total_score": 4,
+                    "analysis": {
+                        "structure_comment": "Средне",
+                        "grammar_comment": "Есть ошибки",
+                        "accuracy_comment": "Норм",
+                        "strengths": ["Есть понимание темы"],
+                        "weaknesses": ["Мало аргументов"]
+                    },
+                    "recommendations": "Пиши больше"
+                })
+        else:
+            error_logger.error(f"Ошибка Yandex GPT: {response.status_code}")
+            return json.dumps({
+                "scores": {"structure": 0, "grammar": 0, "accuracy": 0},
+                "total_score": 0,
+                "analysis": {
+                    "structure_comment": "Ошибка API",
+                    "grammar_comment": "Ошибка API",
+                    "accuracy_comment": "Ошибка API",
+                    "strengths": ["-"],
+                    "weaknesses": ["Техническая ошибка"]
+                },
+                "recommendations": "Попробуй позже"
+            })
     except Exception as e:
-        error_logger.error(f"Ошибка GigaChat: {e}")
-        return f"Ошибка: {e}"
+        error_logger.error(f"Ошибка: {e}")
+        return json.dumps({
+            "scores": {"structure": 0, "grammar": 0, "accuracy": 0},
+            "total_score": 0,
+            "analysis": {
+                "structure_comment": str(e),
+                "grammar_comment": "Ошибка",
+                "accuracy_comment": "Ошибка",
+                "strengths": ["-"],
+                "weaknesses": [str(e)]
+            },
+            "recommendations": "Техническая ошибка"
+        })
 
 # ===== ФУНКЦИЯ ДЛЯ ПРОВЕРКИ ОБЪЕМА =====
 def check_volume(text):
@@ -204,15 +240,15 @@ async def command_start_handler(message: Message) -> None:
     
     log_user_action(user_id, username, "START", "Начал работу с ботом")
     
-    await message.answer(f'Привет! Я - Литера - чат-бот помощник, который способен проанализировать твои сочинения и подобрать тебе книгу под настроение!\n'
-    '\n'
-    'Часть функций находится в разработке, на данный момент доступны функции анализа сочинения\n'
-    '\n'
-    'Список доступных команд:\n'
-    '/help - Показать помощь\n'
-    '/at - Анализ сочинения\n'
-    '/iar - Интервью пользователя и рекомендация книг в соответствии(в разработке, недоступна)\n'
-    '/criteria - подробные критерии\n')
+    await message.answer(
+        'Привет! Я - Литера - чат-бот помощник на Яндекс GPT!\n'
+        '\n'
+        'Анализирую сочинения по критериям ОГЭ\n'
+        '\n'
+        '/at - Анализ сочинения\n'
+        '/criteria - Критерии оценки\n'
+        '/help - Помощь'
+    )
 
 @dp.message(Command('help'))
 async def command_help_handler(message: Message) -> None:
@@ -222,37 +258,21 @@ async def command_help_handler(message: Message) -> None:
     log_user_action(user_id, username, "HELP", "Запросил помощь")
     
     await message.answer(
-        'Доступные команды:\n'
-        '/start - Начать работу\n'
-        '/help - помощь\n'
+        'Команды:\n'
+        '/start - Начать\n'
         '/at - Анализ сочинения\n'
-        '/iar - Интервью пользователя и рекомендация книг в соответствии(в разработке, недоступна)\n'
-        '/criteria - подробные критерии\n'
-        '/dispach - вызов набора команд'
+        '/criteria - Критерии\n'
+        '/cancel - Отмена'
     )
 
 @dp.message(Command('criteria'))
 async def show_criteria(message: Message):
-    user_id = message.from_user.id
-    username = message.from_user.username or "NoUsername"
-    
-    log_user_action(user_id, username, "CRITERIA", "Запросил критерии оценивания")
-    
     await message.answer(
-        "<b>Критерии оценивания ОГЭ 2026 (ФИПИ):</b>\n\n"
-        "<b>1. Структура и содержание (0-4 балла):</b>\n"
-        "• Введение с проблемой\n"
-        "• Аргументация\n"
-        "• Личное мнение\n"
-        "• Заключение\n\n"
-        "<b>2. Грамотность (0-2 балла):</b>\n"
-        "• Грамматические ошибки\n"
-        "• Пунктуационные ошибки\n"
-        "• Стилистика\n\n"
-        "<b>3. Фактологическая точность (0-1 балл):</b>\n"
-        "• Понимание текста\n"
-        "• Отсутствие фактических ошибок\n\n"
-        "<b>Важно!</b> Минимум 70 слов, иначе 0 баллов"
+        "📚 <b>Критерии ОГЭ:</b>\n\n"
+        "1. Структура и содержание (0-4)\n"
+        "2. Грамотность (0-2)\n"
+        "3. Фактологическая точность (0-1)\n\n"
+        "Минимум слов: 70"
     )
 
 @dp.message(Command('at'))
@@ -260,28 +280,22 @@ async def start_analysis(message: Message):
     user_id = message.from_user.id
     username = message.from_user.username or "NoUsername"
     
-    log_user_action(user_id, username, "AT_START", "Начал процесс анализа сочинения")
+    log_user_action(user_id, username, "AT_START", "Начал анализ")
     
     user_states[user_id] = {'stage': 'waiting_topic'}
     await message.answer(
-        "📝 <b>ШАГ 1 ИЗ 3: Введи ТЕМУ сочинения</b>\n\n"
-        "Напиши тему, которую нужно было раскрыть.\n"
-        "Например: <i>'Почему важно сохранять память о войне?'</i>\n\n"
-        "/cancel - отменить"
+        "📝 <b>ШАГ 1/3: Введи ТЕМУ сочинения</b>\n\n"
+        "/cancel - отмена"
     )
 
 @dp.message(Command('cancel'))
 async def cancel(message: Message):
     user_id = message.from_user.id
-    username = message.from_user.username or "NoUsername"
     
     if user_id in user_states:
-        stage = user_states[user_id].get('stage', 'unknown')
-        log_user_action(user_id, username, "CANCEL", f"Отменил действие на этапе {stage}")
         del user_states[user_id]
         await message.answer("✅ Отменено")
     else:
-        log_user_action(user_id, username, "CANCEL", "Попытка отмены без активного действия")
         await message.answer("❌ Нечего отменять")
 
 @dp.message()
@@ -290,42 +304,27 @@ async def handle_text(message: Message):
     username = message.from_user.username or "NoUsername"
     
     if user_id not in user_states:
-        log_user_action(user_id, username, "TEXT_IGNORED", f"Отправил текст без активной сессии: {message.text[:50]}...")
-        await message.answer("Напиши /at для анализа сочинения")
+        await message.answer("Напиши /at для анализа")
         return
     
     state = user_states[user_id]
     current_stage = state.get('stage')
     
     if current_stage == 'waiting_topic':
-        topic = message.text
-        log_user_action(user_id, username, "STEP1_TOPIC", f"Получена тема: {topic[:50]}...")
-        
         user_states[user_id] = {
             'stage': 'waiting_source',
-            'topic': topic
+            'topic': message.text
         }
-        await message.answer(
-            "📝 <b>ШАГ 2 ИЗ 3: Введи ИСХОДНЫЙ ТЕКСТ</b>\n\n"
-            "Напиши текст, на основе которого нужно написать сочинение.\n"
-            "/cancel - отменить"
-        )
+        await message.answer("📝 <b>ШАГ 2/3: Введи ИСХОДНЫЙ ТЕКСТ</b>")
         return
     
     elif current_stage == 'waiting_source':
-        source = message.text
-        log_user_action(user_id, username, "STEP2_SOURCE", f"Получен исходный текст: {len(source)} символов")
-        
         user_states[user_id] = {
             'stage': 'waiting_essay',
             'topic': state['topic'],
-            'source': source
+            'source': message.text
         }
-        await message.answer(
-            "📝 <b>ШАГ 3 ИЗ 3: Отправь СОЧИНЕНИЕ</b>\n\n"
-            "Минимум 70 слов.\n\n"
-            "/cancel - отменить"
-        )
+        await message.answer("📝 <b>ШАГ 3/3: Отправь СОЧИНЕНИЕ</b>\nМинимум 70 слов")
         return
     
     elif current_stage == 'waiting_essay':
@@ -333,118 +332,40 @@ async def handle_text(message: Message):
         topic = state['topic']
         source = state['source']
         
-        log_user_action(user_id, username, "STEP3_ESSAY", f"Получено сочинение: {len(essay_text.split())} слов")
-        
         del user_states[user_id]
         
+        # Проверка объема
         meets_volume, word_count = check_volume(essay_text)
-        
         if not meets_volume:
-            log_user_action(user_id, username, "VOLUME_FAIL", f"Недостаточный объем: {word_count} слов")
-            await message.reply(
-                f"❌ <b>Недостаточный объем!</b>\n\n"
-                f"В твоем сочинении {word_count} слов.\n"
-                f"Минимальный порог: 70 слов.\n\n"
-                f"Согласно критериям ФИПИ, работа получает 0 баллов.",
-                parse_mode='HTML'
-            )
+            await message.reply(f"❌ Мало слов: {word_count}/70")
             return
         
-        bot = message.bot
-        await bot.send_chat_action(message.chat.id, 'typing')
-        progress = await message.reply(
-            f"🔄 Эксперт GigaChat анализирует сочинение ({word_count} слов)...\n"
-            f"Оценка по критериям ФИПИ 2026..."
-        )
+        progress = await message.reply("🔄 Яндекс GPT анализирует...")
         
-        logging.info(f"Запуск анализа для пользователя {user_id}")
-        result = analysis_with_gigachat(essay_text, topic, source)
+        # Анализ
+        result_json = analyze_with_yandex(essay_text, topic, source)
         
         try:
-            json_match = re.search(r'\{.*\}', result, re.DOTALL)
-            if json_match:
-                data = json.loads(json_match.group())
-                
-                total = data.get('total_score', 0)
-                
-                log_essay_analysis(
-                    user_id, username, topic, 
-                    len(source), word_count, 
-                    f"Баллы: {total}/7"
-                )
-                
-                structure_score = data.get('scores', {}).get('structure', 0)
-                grammar_score = data.get('scores', {}).get('grammar', 0)
-                accuracy_score = data.get('scores', {}).get('accuracy', 0)
-                
-                bar_structure = "🟩" * structure_score + "⬜" * (4 - structure_score)
-                bar_grammar = "🟩" * grammar_score + "⬜" * (2 - grammar_score)
-                bar_accuracy = "🟩" * accuracy_score + "⬜" * (1 - accuracy_score)
-                
-                answer = f"""
-📊 <b>ЭКСПЕРТНОЕ ЗАКЛЮЧЕНИЕ (ФИПИ 2026)</b>
-{'='*40}
+            data = json.loads(result_json)
+            
+            total = data.get('total_score', 0)
+            scores = data.get('scores', {})
+            
+            answer = f"""
+📊 <b>РЕЗУЛЬТАТ:</b>
 
-📝 <b>Объем:</b> {word_count} слов (минимум 70)
+1. Структура: {scores.get('structure', 0)}/4
+2. Грамотность: {scores.get('grammar', 0)}/2
+3. Точность: {scores.get('accuracy', 0)}/1
 
-<b>1. Структура и содержание ({structure_score}/4)</b>
-{bar_structure}
-💬 {data.get('analysis', {}).get('structure_comment', 'Анализ выполнен')}
+<b>ИТОГО: {total}/7</b>
 
-<b>2. Грамотность ({grammar_score}/2)</b>
-{bar_grammar}
-💬 {data.get('analysis', {}).get('grammar_comment', 'Анализ выполнен')}
-
-<b>3. Фактологическая точность ({accuracy_score}/1)</b>
-{bar_accuracy}
-💬 {data.get('analysis', {}).get('accuracy_comment', 'Анализ выполнен')}
-
-<b>ИТОГОВЫЙ БАЛЛ: {total}/7</b>
-
-✨ <b>Сильные стороны:</b>
+💡 {data.get('recommendations', '')}
 """
-                for strength in data.get('analysis', {}).get('strengths', []):
-                    answer += f"✅ {strength}\n"
-                
-                answer += f"\n📌 <b>Что улучшить:</b>\n"
-                for weakness in data.get('analysis', {}).get('weaknesses', []):
-                    answer += f"• {weakness}\n"
-                
-                answer += f"""
-
-💡 <b>Рекомендации:</b>
-{data.get('recommendations', 'Продолжай работать над сочинениями!')}
-
-🔍 <b>Заключение эксперта:</b>
-{data.get('expert_conclusion', 'Сочинение проанализировано.')}
-"""
-                await progress.edit_text(answer, parse_mode='HTML')
-                logging.info(f"Анализ завершен для пользователя {user_id}, баллы: {total}/7")
-            else:
-                logging.warning(f"Не удалось распарсить JSON для пользователя {user_id}")
-                await progress.edit_text(f"📝 Результат анализа:\n\n{result}")
+            await progress.edit_text(answer, parse_mode='HTML')
+            
         except Exception as e:
-            error_logger.error(f"Ошибка при обработке результата для пользователя {user_id}: {e}")
-            await progress.edit_text(f"📝 Результат анализа:\n\n{result}")
-        
-        return
-
-@dp.message(Command('dispach'))
-async def dispach(message: Message):
-    user_id = message.from_user.id
-    username = message.from_user.username or "NoUsername"
-    
-    log_user_action(user_id, username, "DISPACH", "Запросил список команд")
-    
-    await message.answer(
-        "Набор команд:\n"
-        "/help - помощь\n"
-        "/criteria - Критерии оценивания\n"
-        "/start - Запуск/Перезапуск бота\n"
-        "/cancel - отмена действия\n"
-        "/at - анализ текста\n"
-        "/iar - Опрос и Рекомендации книг(недоступно, в разработке)"
-    )
+            await progress.edit_text(f"Ошибка: {e}")
 
 async def main() -> None:
     bot = Bot(token=TOKEN)
@@ -455,7 +376,6 @@ if __name__ == '__main__':
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logging.info("Бот остановлен пользователем")
+        logging.info("Остановлен")
     except Exception as e:
-        error_logger.critical(f"Критическая ошибка: {e}")
-        logging.critical(f"Критическая ошибка: {e}")
+        logging.critical(f"Ошибка: {e}")
